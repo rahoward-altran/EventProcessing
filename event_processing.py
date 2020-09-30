@@ -6,8 +6,11 @@ from statistics import mean
 from datetime import datetime, timedelta
 from SensorMap import SensorMap
 
-LOCATION_FILENAME_W = 'locations.json'
-DATA_COLLECTING_TIME_SEC = 3600
+LOCATION_FILENAME_W = 'locations_part3.json'
+EP_INFO_FILENAME = 'EP_info_part3.json'
+# LOCATION_FILENAME_W = 'locations.json'
+# EP_INFO_FILENAME = 'EP_info_part1_2.json'
+DATA_COLLECTING_TIME_SEC = 5
 MAX_SIZED_STORED = 750
 
 
@@ -51,8 +54,8 @@ logging.basicConfig(filename='Log.log', filemode='w', level=logging.INFO)
 logging.info("Program has started and the log is open")
 
 # READ EP_info.json
-details = load_json('EP_info.json')
-logging.info("EP_info.json has been read")
+details = load_json(EP_INFO_FILENAME)
+logging.info("%s has been read" % EP_INFO_FILENAME)
 
 
 def create_queue(sqs_cli, topic_arn):
@@ -132,9 +135,18 @@ done = False
 event_id_collection = []
 end_time = datetime.now() + timedelta(0, DATA_COLLECTING_TIME_SEC)
 while not done:
+
     try:
         # RECEIVE MESSAGE
-        response = sqs.receive_message(QueueUrl=queue_url, WaitTimeSeconds=5)
+        response = sqs.receive_message(QueueUrl=queue_url)
+        # REPORT ON QUEUE LENGTH
+        queue_length = sqs.get_queue_attributes(
+            QueueUrl=queue_url,
+            AttributeNames=[
+                'ApproximateNumberOfMessages'
+            ]
+        )['Attributes']['ApproximateNumberOfMessages']
+        print(queue_length)
         # READ THE MESSAGE (EXTRACT_MESSAGE)
         message, receipt_handle = extract_message(response)
         location_id = message['locationId']
@@ -150,6 +162,7 @@ while not done:
                 # add data to the map
                 sensor_map.the_map[location_id].setdefault(timestamp, []).append(value)
                 logging.info("New data added to map")
+                print("add data to map")
 
         # DELETE MESSAGE
         boto3.resource('sqs').Message(queue_url, receipt_handle).delete()

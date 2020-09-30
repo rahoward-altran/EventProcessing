@@ -4,6 +4,6 @@
     "FileName" : "locations-part2.json"
   },
   "SNS" : {
-    "Arn" : " arn:aws:sns:eu-west-1:552908040772:EventProcessing-Altran-snsTopicSensorDataPart2-1PP6L3YPFSUSO"
+    "Arn" : "arn:aws:sns:eu-west-1:552908040772:EventProcessing-Altran-snsTopicSensorDataPart2-1PP6L3YPFSUSO"
   }
 }
