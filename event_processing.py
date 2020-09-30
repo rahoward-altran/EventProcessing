@@ -1,13 +1,20 @@
 import boto3
 import json
+import csv
 import logging
+from statistics import mean
+from datetime import datetime, timedelta
 from SensorMap import SensorMap
 
 LOCATION_FILENAME_W = 'locations.json'
+DATA_COLLECTING_TIME_SEC = 3600  # TODO RUN 3600
+MAX_SIZED_STORED = 750
+
 
 def load_json(filename):
     with open(filename) as json_file:
         return json.load(json_file)
+
 
 def get_policy(topic_arn, queue_arn):
     policy_document = {
@@ -25,12 +32,18 @@ def get_policy(topic_arn, queue_arn):
     }
     return json.dumps(policy_document)
 
+
 def is_valid_id(location_id, location_info):
-    # london_id_list = [item['id'] for item in location_info]
     london_id_list = []
     for location in location_info:
         london_id_list.append(location['id'])
     return location_id in london_id_list
+
+
+def remove_old_ids(event_id_collection):
+    #to keep things efficient keep event_id_collection small
+    if len(event_id_collection) > MAX_SIZED_STORED:
+        event_id_collection.pop(0)
 
 # SET UP LOGGING:
 logging.basicConfig(filename='Log.log', filemode='w', level=logging.INFO)
@@ -81,13 +94,15 @@ logging.info("Downloaded %s from bucket %s" % (details["S3"]["FileName"], detail
 # CREATE SensorMap
 sensor_map = SensorMap(location_info)
 
+
 def subscribe_q_to_notifications(topic_arn, queue_arn):
     sns = boto3.client('sns')
-    response = sns.subscribe(
+    sns.subscribe(
         TopicArn=topic_arn,
         Protocol='sqs',
         Endpoint=queue_arn
     )
+
 
 # SUBSCRIBE THE QUEUE TO RECEIVE SNS NOTIFICATIONS
 subscribe_q_to_notifications(topic_arn, queue_arn)
@@ -105,34 +120,62 @@ def extract_message(response):
         logging.info('no new messages on sqs')
         raise KeyError
 
+
 # RECEIVE AND PROCESS THE MESSAGE FROM THE QUEUE
 done = False
+event_id_collection = []
+start_time = datetime.now()
+end_time = start_time + timedelta(0, DATA_COLLECTING_TIME_SEC)
 while not done:
-    response = sqs.receive_message(
-        QueueUrl=queue_url
-    )
     try:
+        # RECEIVE MESSAGE
+        response = sqs.receive_message(
+            QueueUrl=queue_url,
+            WaitTimeSeconds=5
+        )
+        # READ THE MESSAGE (EXTRACT_MESSAGE)
         message, receipt_handle = extract_message(response)
         location_id = message['locationId']
-        # event_id = message['eventId']
+        event_id = message['eventId']
         value = message['value']
-        timestamp = message['timestamp']
-        data = sensor_map.the_map[location_id].setdefault(timestamp, []).append(value)
-        print(data)
+        timestamp_unformatted_ms_str = message['timestamp']
+        timestamp_unformatted_s = int(timestamp_unformatted_ms_str)/1000
+        timestamp_full = datetime.utcfromtimestamp(timestamp_unformatted_s)
+        timestamp = timestamp_full.strftime("%Y-%m-%d %H:%M")
 
-        #delete message
-        # receipt handle = message
+        # PROCESS THE MESSAGE
+        if is_valid_id(location_id, location_info):
+            if event_id not in event_id_collection:
+                event_id_collection.append(event_id)
+                remove_old_ids(event_id_collection)
+                # add data to the map
+                sensor_map.the_map[location_id].setdefault(timestamp, []).append(value)
+                logging.info("New data added to map")
+
+        # DELETE MESSAGE
         sqs_resource = boto3.resource('sqs')
         delete_me = sqs_resource.Message(queue_url, receipt_handle)
         delete_me.delete()
-    except KeyError:
-        done = True
-    except KeyboardInterrupt:
-        done = True
 
-    # process_message(message)
+        # STOP RECEIVING MESSAGES WHEN DATA_COLLECTING_TIME HAS BEEN REACHED
+        if datetime.now() >= end_time:
+            done = True
+
+    except KeyError:
+        # stop processing current non-existent message
+        continue
 
 # DELETE QUEUE
-response = sqs.delete_queue(
+sqs.delete_queue(
     QueueUrl=queue_url
 )
+logging.info("queue deleted")
+
+# OUTPUT MAP AS CSV FOR OFF APP PROCESSING
+with open('sensor_data.csv', 'w', newline='\n') as f:
+    writer = csv.writer(f)
+    for id, time_dict in sensor_map.the_map.items():
+        for time_key, value_list in time_dict.items():
+            avg = mean(value_list)
+            row = [id, time_key, avg]
+            writer.writerow(row)
