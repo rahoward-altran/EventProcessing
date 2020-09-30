@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 from SensorMap import SensorMap
 
 LOCATION_FILENAME_W = 'locations.json'
-DATA_COLLECTING_TIME_SEC = 3600  # TODO RUN 3600
+DATA_COLLECTING_TIME_SEC = 3600
 MAX_SIZED_STORED = 750
 
 
@@ -44,6 +44,7 @@ def remove_old_ids(event_id_collection):
     #to keep things efficient keep event_id_collection small
     if len(event_id_collection) > MAX_SIZED_STORED:
         event_id_collection.pop(0)
+
 
 # SET UP LOGGING:
 logging.basicConfig(filename='Log.log', filemode='w', level=logging.INFO)
@@ -121,27 +122,25 @@ def extract_message(response):
         raise KeyError
 
 
+def get_timestamp(timestamp_ms_str):
+    timestamp_s = int(timestamp_ms_str) / 1000
+    return datetime.utcfromtimestamp(timestamp_s).strftime("%Y-%m-%d %H:%M")
+
+
 # RECEIVE AND PROCESS THE MESSAGE FROM THE QUEUE
 done = False
 event_id_collection = []
-start_time = datetime.now()
-end_time = start_time + timedelta(0, DATA_COLLECTING_TIME_SEC)
+end_time = datetime.now() + timedelta(0, DATA_COLLECTING_TIME_SEC)
 while not done:
     try:
         # RECEIVE MESSAGE
-        response = sqs.receive_message(
-            QueueUrl=queue_url,
-            WaitTimeSeconds=5
-        )
+        response = sqs.receive_message(QueueUrl=queue_url, WaitTimeSeconds=5)
         # READ THE MESSAGE (EXTRACT_MESSAGE)
         message, receipt_handle = extract_message(response)
         location_id = message['locationId']
         event_id = message['eventId']
         value = message['value']
-        timestamp_unformatted_ms_str = message['timestamp']
-        timestamp_unformatted_s = int(timestamp_unformatted_ms_str)/1000
-        timestamp_full = datetime.utcfromtimestamp(timestamp_unformatted_s)
-        timestamp = timestamp_full.strftime("%Y-%m-%d %H:%M")
+        timestamp = get_timestamp(message['timestamp'])
 
         # PROCESS THE MESSAGE
         if is_valid_id(location_id, location_info):
@@ -153,9 +152,7 @@ while not done:
                 logging.info("New data added to map")
 
         # DELETE MESSAGE
-        sqs_resource = boto3.resource('sqs')
-        delete_me = sqs_resource.Message(queue_url, receipt_handle)
-        delete_me.delete()
+        boto3.resource('sqs').Message(queue_url, receipt_handle).delete()
 
         # STOP RECEIVING MESSAGES WHEN DATA_COLLECTING_TIME HAS BEEN REACHED
         if datetime.now() >= end_time:
@@ -166,9 +163,7 @@ while not done:
         continue
 
 # DELETE QUEUE
-sqs.delete_queue(
-    QueueUrl=queue_url
-)
+sqs.delete_queue(QueueUrl=queue_url)
 logging.info("queue deleted")
 
 # OUTPUT MAP AS CSV FOR OFF APP PROCESSING
