@@ -34,6 +34,9 @@ def extract_messages(messages):
         except KeyError:
             logging.info('no new messages on sqs')
             raise KeyError
+        except Exception as e:
+            logging.debug("error in extract message")
+            logging.debug(e)
     return message_list, delete_list
 
 
@@ -181,13 +184,23 @@ if __name__ == "__main__":
     p2 = Process(target=thread_function,
                  args=(queue_url, end_time, location_info, q)
                  )
+    p3 = Process(target=thread_function,
+                 args=(queue_url, end_time, location_info, q)
+                 )
+    p4 = Process(target=thread_function,
+                 args=(queue_url, end_time, location_info, q)
+                 )
 
     p1.start()
     p2.start()
+    p3.start()
+    p4.start()
     logging.info("multiprocessing started")
 
     p1.join()
     p2.join()
+    p3.join()
+    p4.join()
     logging.info("multiprocessing joined")
 
     # DELETE QUEUE
