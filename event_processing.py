@@ -9,9 +9,7 @@ from SensorMap import SensorMap
 
 LOCATION_FILENAME_W = 'locations_part3.json'
 EP_INFO_FILENAME = 'EP_info_part3.json'
-# LOCATION_FILENAME_W = 'locations.json'
-# EP_INFO_FILENAME = 'EP_info_part1_2.json'
-DATA_COLLECTING_TIME_SEC = 300
+DATA_COLLECTING_TIME_SEC = 3600
 BATCH_NUMBER = 10
 
 
@@ -20,73 +18,71 @@ def load_json(filename):
         return json.load(json_file)
 
 
-def extract_message(response):
+def extract_messages(messages):
+    message_list = []
+    delete_list = []
+
+    for message in messages:
         try:
-            receipt_handle = response['Messages'][0]['ReceiptHandle']
-            body_str = response['Messages'][0]['Body']
+            delete_list.append({
+                'Id': message['MessageId'],
+                'ReceiptHandle': message['ReceiptHandle']
+            })
+            body_str = message['Body']
             message_str = json.loads(body_str)['Message']
-            message = json.loads(message_str)
-            return message, receipt_handle
+            message_list.append(json.loads(message_str))
         except KeyError:
             logging.info('no new messages on sqs')
             raise KeyError
+    return message_list, delete_list
 
 
 def get_timestamp(timestamp_ms_str):
-        timestamp_s = int(timestamp_ms_str) / 1000
-        return datetime.utcfromtimestamp(timestamp_s).strftime("%Y-%m-%d %H:%M")
+    timestamp_s = int(timestamp_ms_str) / 1000
+    return datetime.utcfromtimestamp(timestamp_s).strftime("%Y-%m-%d %H:%M")
 
 
 def thread_function(queue_url, end_time, location_info, q):
-        # STOP RECEIVING MESSAGES WHEN DATA_COLLECTING_TIME HAS BEEN REACHED
-        while datetime.now() < end_time:
-            response = boto3.client('sqs').receive_message(QueueUrl=queue_url,
-                                                           WaitTimeSeconds=1)
-            # ToDo: MaxNumberOfMessages= BATCH_NUMBER
-            #ToDo handle batch messages
+    # STOP RECEIVING MESSAGES WHEN DATA_COLLECTING_TIME HAS BEEN REACHED
+    while datetime.now() < end_time:
+        response = boto3.client('sqs').receive_message(QueueUrl=queue_url,
+                                                       WaitTimeSeconds=1,
+                                                       MaxNumberOfMessages=10)
+        # READ THE MESSAGE (EXTRACT_MESSAGE)
+        try:
+            messages = response['Messages']
+            message_list, delete_list = extract_messages(messages)
 
-            # READ THE MESSAGE (EXTRACT_MESSAGE)
-            message, receipt_handle = extract_message(response)
-            location_id = message['locationId']
-            # event_id = message['eventId']
-            value = message['value']
-            timestamp = get_timestamp(message['timestamp'])
+            for message in message_list:
+                location_id = message['locationId']
+                # event_id = message['eventId']
+                value = message['value']
+                timestamp = get_timestamp(message['timestamp'])
 
-            def is_valid_id(location_id, location_info):
-                london_id_list = []
-                for location in location_info:
-                    london_id_list.append(location['id'])
-                return location_id in london_id_list
+                def is_valid_id(location_id, location_info):
+                    london_id_list = []
+                    for location in location_info:
+                        london_id_list.append(location['id'])
+                    return location_id in london_id_list
 
-            # def remove_old_ids(event_id_collection):
-            #     # to keep things efficient keep event_id_collection small
-            #     if len(event_id_collection) > MAX_SIZED_STORED:
-            #         event_id_collection.pop(0)
+                # PROCESS THE MESSAGE
+                if is_valid_id(location_id, location_info):
+                    # Todo: handle event id duplicates
+                    q.put({
+                        'location_id': location_id,
+                        'timestamp': timestamp,
+                        'value': value
+                    })
+        except KeyError:
+            # message not constructed as expected / no messages were received
+            pass
 
-            # PROCESS THE MESSAGE
 
-
-            if is_valid_id(location_id, location_info):
-                # DOESN'T HANDLE EVENT ID DUPLICATES
-                # add data to the map
-                dict = {
-                    'location_id': location_id,
-                    'timestamp': timestamp,
-                    'value': value
-                }
-                q.put_nowait(dict)
-
-            # DELETE MESSAGE ToDo: Batch delete
-            boto3.resource('sqs').Message(queue_url, receipt_handle).delete()
-            # response = client.delete_message_batch(
-            #     QueueUrl='string',
-            #     Entries=[
-            #         {
-            #             'Id': 'string',
-            #             'ReceiptHandle': 'string'
-            #         },
-            #     ]
-            # )
+        # DELETE MESSAGES
+        boto3.client('sqs').delete_message_batch(
+            QueueUrl=queue_url,
+            Entries=delete_list
+        )
 
 
 if __name__ == "__main__":
@@ -136,7 +132,7 @@ if __name__ == "__main__":
         return queue_url, queue_arn
 
 
-    # CREATE QUEUE - event_notification_queue
+    # CREATE QUEUE
     sqs = boto3.client('sqs')
     topic_arn = details['SNS']['Arn']
     queue_url, queue_arn = create_queue(sqs, topic_arn)
@@ -176,17 +172,28 @@ if __name__ == "__main__":
     # RECEIVE AND PROCESS THE MESSAGE FROM THE QUEUE USING MULTIPROCESSING
     # event_id_collection = multiprocessing.Array(c_char_p, MAX_SIZED_STORED, lock=False)
     q = Manager().Queue()
-
     end_time = datetime.now() + timedelta(0, DATA_COLLECTING_TIME_SEC)
+
     logging.info('Before creating process')
-    p = Process(target=thread_function,
-                args=(queue_url, end_time, location_info, q)
-                )
-    p.start()
+    p1 = Process(target=thread_function,
+                 args=(queue_url, end_time, location_info, q)
+                 )
+    p2 = Process(target=thread_function,
+                 args=(queue_url, end_time, location_info, q)
+                 )
+
+    p1.start()
+    p2.start()
     logging.info("multiprocessing started")
 
-    p.join()
+    p1.join()
+    p2.join()
     logging.info("multiprocessing joined")
+
+    # DELETE QUEUE
+    sqs.delete_queue(QueueUrl=queue_url)
+    logging.info("queue deleted")
+
 
     def q_to_map(q, sensor_map):
         while not q.empty():
@@ -196,28 +203,16 @@ if __name__ == "__main__":
             logging.info("New data added to map")
 
 
+    # BUCKETS THE MULTIPROCESSING QUEUE DATA INTO {ID : {TIME : [VALUES]}}
     q_to_map(q, sensor_map)
-
-
-    # with multiprocessing.Pool() as pool:
-        # pool. apply? process?
-        # executor.submit(thread_function,
-        #                 queue_url=queue_url,
-        #                 event_id_collection=event_id_collection,
-        #                 sensor_map=sensor_map,
-        #                 end_time=end_time)
-
-
-    # DELETE QUEUE
-    sqs.delete_queue(QueueUrl=queue_url)
-    logging.info("queue deleted")
 
     # OUTPUT MAP AS CSV FOR OFF APP PROCESSING
     with open('sensor_data.csv', 'w', newline='\n') as f:
         writer = csv.writer(f)
-        for id, time_dict in sensor_map.the_map.items():
+        for loc_id, time_dict in sensor_map.the_map.items():
             for time_key, value_list in time_dict.items():
                 avg = mean(value_list)
-                row = [id, time_key, avg]
+                row = [loc_id, time_key, avg]
                 writer.writerow(row)
     logging.info("Sensor data has been written as a csv")
+
